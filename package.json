@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node --experimental-strip-types scripts/copy-assets.ts",
     "dev": "cross-env NODE_OPTIONS=--no-deprecation next dev",
     "prebuild": "node --experimental-strip-types scripts/copy-assets.ts",
     "build": "cross-env NODE_OPTIONS=\"--no-deprecation --max-old-space-size=8000\" next build",
