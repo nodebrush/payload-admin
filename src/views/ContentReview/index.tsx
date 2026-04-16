@@ -1,18 +1,40 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
-import type { ContentDocument } from './fetchContent'
+import React, { useMemo, useState, useTransition } from 'react'
+import type { ContentDocument, ReviewNote } from './fetchContent'
+import { markDocumentReviewed, unmarkDocumentReviewed } from './actions'
 
 type Props = {
   documents: ContentDocument[]
   localeCodes: string[]
+  initialNotes: Record<string, ReviewNote>
 }
 
-const MARKED_STYLE = `
+type ReviewStatus = 'reviewed' | 'changed' | 'new'
+
+function getReviewStatus(doc: ContentDocument, notes: Record<string, ReviewNote>): ReviewStatus {
+  const note = notes[doc.docKey]
+  if (!note) return 'new'
+  // Compare timestamps — if doc was updated after the note was saved, it's changed
+  if (doc.docUpdatedAt && note.docUpdatedAt) {
+    const docTime = new Date(doc.docUpdatedAt).getTime()
+    const noteTime = new Date(note.docUpdatedAt).getTime()
+    if (docTime > noteTime) return 'changed'
+  }
+  return 'reviewed'
+}
+
+const STYLES = `
   .cr-row { cursor: pointer; border-left: 3px solid transparent; transition: background 0.1s; }
   .cr-row:hover { background: rgba(255,255,255,0.03); }
   .cr-row-marked { border-left: 3px solid #f59e0b !important; background: rgba(245, 158, 11, 0.06) !important; }
   .cr-row-marked:hover { background: rgba(245, 158, 11, 0.1) !important; }
+  .cr-row-missing { border-left: 3px solid #ef4444 !important; background: rgba(239, 68, 68, 0.05) !important; }
+  .cr-row-missing:hover { background: rgba(239, 68, 68, 0.09) !important; }
+  .cr-row-warning { border-left: 3px solid #ca8a04 !important; background: rgba(202, 138, 4, 0.04) !important; }
+  .cr-row-warning:hover { background: rgba(202, 138, 4, 0.08) !important; }
+  .cr-row-marked.cr-row-missing { border-left: 3px solid #f59e0b !important; background: rgba(245, 158, 11, 0.1) !important; }
+  .cr-row-marked.cr-row-warning { border-left: 3px solid #f59e0b !important; background: rgba(245, 158, 11, 0.1) !important; }
 `
 
 function getDocKey(doc: ContentDocument): string {
@@ -61,26 +83,37 @@ function DocumentCard({
   localeB,
   markedFields,
   onToggleMark,
-  showOnlyMarked,
+  showMode,
+  reviewStatus,
+  onToggleReviewed,
+  isPending,
 }: {
   doc: ContentDocument
   localeA: string
   localeB: string
   markedFields: Set<string>
   onToggleMark: (key: string) => void
-  showOnlyMarked: boolean
+  showMode: 'all' | 'missing' | 'warnings' | 'marked'
+  reviewStatus: ReviewStatus
+  onToggleReviewed: (doc: ContentDocument) => void
+  isPending: boolean
 }) {
-  const docKey = getDocKey(doc)
+  const docKey = doc.docKey
   const collectionLabel =
     doc.type === 'collection'
       ? doc.collectionLabel ?? doc.collection
       : `Global: ${doc.globalLabel ?? doc.globalSlug}`
 
-  const visibleFields = showOnlyMarked
-    ? doc.fields.filter((f) => markedFields.has(makeFieldKey(docKey, f.path)))
-    : doc.fields
+  const visibleFields = doc.fields.filter((f) => {
+    if (showMode === 'missing') return f.isMissing
+    if (showMode === 'warnings') return f.isWarning && !f.isMissing
+    if (showMode === 'marked') return markedFields.has(makeFieldKey(docKey, f.path))
+    return true
+  })
 
   const markedCount = doc.fields.filter((f) => markedFields.has(makeFieldKey(docKey, f.path))).length
+  const missingCount = doc.fields.filter((f) => f.isMissing).length
+  const warningCount = doc.fields.filter((f) => f.isWarning && !f.isMissing).length
 
   return (
     <div
@@ -113,8 +146,48 @@ function DocumentCard({
           >
             {collectionLabel}
           </span>
-          <h3 style={{ margin: '2px 0 0', fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <h3
+            style={{
+              margin: '2px 0 0',
+              fontSize: '14px',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              flexWrap: 'wrap',
+            }}
+          >
             {doc.documentTitle}
+            {missingCount > 0 && (
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  color: '#ef4444',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: '10px',
+                  padding: '1px 7px',
+                }}
+              >
+                {missingCount} missing
+              </span>
+            )}
+            {warningCount > 0 && (
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  color: '#ca8a04',
+                  background: 'rgba(202, 138, 4, 0.1)',
+                  border: '1px solid rgba(202, 138, 4, 0.3)',
+                  borderRadius: '10px',
+                  padding: '1px 7px',
+                }}
+              >
+                {warningCount} warnings
+              </span>
+            )}
             {markedCount > 0 && (
               <span
                 style={{
@@ -130,29 +203,58 @@ function DocumentCard({
                 {markedCount} marked
               </span>
             )}
+            {reviewStatus === 'reviewed' && (
+              <span style={{ fontSize: '11px', fontWeight: 500, color: '#4ade80', background: 'rgba(74,222,128,0.08)', border: '1px solid rgba(74,222,128,0.25)', borderRadius: '10px', padding: '1px 7px' }}>
+                ✓ reviewed
+              </span>
+            )}
+            {reviewStatus === 'changed' && (
+              <span style={{ fontSize: '11px', fontWeight: 500, color: '#fb923c', background: 'rgba(251,146,60,0.08)', border: '1px solid rgba(251,146,60,0.25)', borderRadius: '10px', padding: '1px 7px' }}>
+                ↺ changed
+              </span>
+            )}
           </h3>
         </div>
-        <a
-          href={doc.editUrl}
-          style={{
-            fontSize: '12px',
-            color: 'var(--theme-elevation-500)',
-            textDecoration: 'none',
-            padding: '4px 8px',
-            border: '1px solid var(--theme-elevation-200)',
-            borderRadius: '3px',
-            flexShrink: 0,
-          }}
-        >
-          Edit
-        </a>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+          <button
+            type="button"
+            disabled={isPending}
+            onClick={() => onToggleReviewed(doc)}
+            style={{
+              fontSize: '12px',
+              color: reviewStatus === 'reviewed' ? '#4ade80' : 'var(--theme-elevation-500)',
+              background: 'transparent',
+              border: `1px solid ${reviewStatus === 'reviewed' ? 'rgba(74,222,128,0.4)' : 'var(--theme-elevation-200)'}`,
+              borderRadius: '3px',
+              padding: '4px 8px',
+              cursor: isPending ? 'not-allowed' : 'pointer',
+              opacity: isPending ? 0.5 : 1,
+              transition: 'color 0.15s, border-color 0.15s',
+            }}
+          >
+            {reviewStatus === 'reviewed' ? '✓ Reviewed' : 'Mark Reviewed'}
+          </button>
+          <a
+            href={doc.editUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              fontSize: '12px',
+              color: 'var(--theme-elevation-500)',
+              textDecoration: 'none',
+              padding: '4px 8px',
+              border: '1px solid var(--theme-elevation-200)',
+              borderRadius: '3px',
+            }}
+          >
+            Edit ↗
+          </a>
+        </div>
       </div>
 
       {/* Fields table */}
       {visibleFields.length === 0 ? (
-        <div
-          style={{ padding: '12px 16px', fontSize: '13px', color: 'var(--theme-elevation-400)' }}
-        >
+        <div style={{ padding: '12px 16px', fontSize: '13px', color: 'var(--theme-elevation-400)' }}>
           No text content.
         </div>
       ) : (
@@ -170,12 +272,27 @@ function DocumentCard({
               const isMarked = markedFields.has(fieldKey)
               const aVal = field.values[localeA] ?? ''
               const bVal = field.values[localeB] ?? ''
-              const same = aVal === bVal
+              const same = aVal === bVal && !field.isMissing
+
+              let rowClass = 'cr-row'
+              if (isMarked) rowClass += ' cr-row-marked'
+              else if (field.isMissing) rowClass += ' cr-row-missing'
+              else if (field.isWarning) rowClass += ' cr-row-warning'
+
+              const pathColor = field.isMissing
+                ? '#ef4444'
+                : field.isWarning
+                ? '#ca8a04'
+                : 'var(--theme-elevation-500)'
+
               return (
                 <tr
                   key={i}
-                  className={`cr-row${isMarked ? ' cr-row-marked' : ''}`}
-                  onClick={() => onToggleMark(fieldKey)}
+                  className={rowClass}
+                  onClick={(e) => {
+                    if (window.getSelection()?.toString().length) return
+                    onToggleMark(fieldKey)
+                  }}
                   style={{ borderTop: '1px solid var(--theme-elevation-100, #222)' }}
                   title={isMarked ? 'Click to unmark' : 'Click to mark for edit'}
                 >
@@ -184,27 +301,66 @@ function DocumentCard({
                       ...tdStyle,
                       fontFamily: 'monospace',
                       fontSize: '11px',
-                      color: 'var(--theme-elevation-500)',
+                      color: pathColor,
                       width: '180px',
                       maxWidth: '180px',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
-                    title={field.path}
+                    title={field.warningNote ? `${field.path} — ${field.warningNote}` : field.path}
                   >
                     {field.path}
+                    {field.isMissing && <span style={{ marginLeft: '5px', opacity: 0.7 }}>⚠</span>}
+                    {field.isWarning && !field.isMissing && <span style={{ marginLeft: '5px', opacity: 0.7 }}>~</span>}
                   </td>
-                  <td style={tdStyle}>{aVal}</td>
-                  <td
-                    style={{
-                      ...tdStyle,
-                      borderRight: 'none',
-                      color: same ? 'var(--theme-elevation-500)' : 'inherit',
-                    }}
-                  >
-                    {bVal}
-                  </td>
+
+                  {field.singleValue !== undefined ? (
+                    // Non-localized JSON field — spans both locale columns
+                    <td
+                      colSpan={2}
+                      style={{
+                        ...tdStyle,
+                        borderRight: 'none',
+                        fontFamily: 'monospace',
+                        fontSize: '12px',
+                        color: field.isMissing ? 'rgba(239,68,68,0.7)' : 'var(--theme-elevation-600)',
+                      }}
+                    >
+                      {field.singleValue}
+                    </td>
+                  ) : (
+                    <>
+                      <td
+                        style={{
+                          ...tdStyle,
+                          color: !aVal && field.isMissing ? 'rgba(239,68,68,0.5)' : undefined,
+                          fontStyle: !aVal ? 'italic' : undefined,
+                        }}
+                      >
+                        {aVal || (field.isMissing ? 'empty' : '')}
+                      </td>
+                      <td
+                        style={{
+                          ...tdStyle,
+                          borderRight: 'none',
+                          color: !bVal && field.isMissing
+                            ? 'rgba(239,68,68,0.5)'
+                            : same && !field.isWarning
+                            ? 'var(--theme-elevation-500)'
+                            : undefined,
+                          fontStyle: !bVal ? 'italic' : undefined,
+                        }}
+                      >
+                        {bVal || (field.isMissing ? 'empty' : '')}
+                        {field.isWarning && field.warningNote && !field.isMissing && (
+                          <span style={{ display: 'block', fontSize: '11px', color: '#ca8a04', opacity: 0.8, marginTop: '2px' }}>
+                            {field.warningNote}
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  )}
                 </tr>
               )
             })}
@@ -225,12 +381,17 @@ function downloadJson(data: unknown, filename: string) {
   URL.revokeObjectURL(url)
 }
 
-export function ContentReviewList({ documents, localeCodes }: Props) {
+type ShowMode = 'all' | 'missing' | 'warnings' | 'marked'
+
+export function ContentReviewList({ documents, localeCodes, initialNotes }: Props) {
   const [localeA, setLocaleA] = useState(localeCodes[0] ?? 'en')
   const [localeB, setLocaleB] = useState(localeCodes[1] ?? localeCodes[0] ?? 'en')
-  const [filterKey, setFilterKey] = useState('all')
+  const [filterKey, setFilterKey] = useState('new')
   const [markedFields, setMarkedFields] = useState(new Set<string>())
-  const [showOnlyMarked, setShowOnlyMarked] = useState(false)
+  const [showMode, setShowMode] = useState<ShowMode>('all')
+  const [notes, setNotes] = useState<Record<string, ReviewNote>>(initialNotes)
+  const [pendingKeys, setPendingKeys] = useState(new Set<string>())
+  const [, startTransition] = useTransition()
 
   const handleToggleMark = (key: string) => {
     setMarkedFields((prev) => {
@@ -241,12 +402,41 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
     })
   }
 
+  const handleToggleReviewed = (doc: ContentDocument) => {
+    const key = doc.docKey
+    const isReviewed = !!notes[key] && getReviewStatus(doc, notes) === 'reviewed'
+    setPendingKeys((prev) => new Set(prev).add(key))
+    startTransition(async () => {
+      try {
+        if (isReviewed) {
+          await unmarkDocumentReviewed(key)
+          setNotes((prev) => {
+            const next = { ...prev }
+            delete next[key]
+            return next
+          })
+        } else {
+          await markDocumentReviewed(key, doc.docUpdatedAt)
+          setNotes((prev) => ({
+            ...prev,
+            [key]: { key, docUpdatedAt: doc.docUpdatedAt },
+          }))
+        }
+      } finally {
+        setPendingKeys((prev) => {
+          const next = new Set(prev)
+          next.delete(key)
+          return next
+        })
+      }
+    })
+  }
+
   const groupOptions = useMemo(() => {
     const seen = new Set<string>()
     const opts: Array<{ key: string; label: string }> = []
     for (const doc of documents) {
-      const key =
-        doc.type === 'collection' ? `col:${doc.collection}` : `glob:${doc.globalSlug}`
+      const key = doc.type === 'collection' ? `col:${doc.collection}` : `glob:${doc.globalSlug}`
       if (!seen.has(key)) {
         seen.add(key)
         opts.push({
@@ -261,24 +451,53 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
     return opts
   }, [documents])
 
-  const filtered = useMemo(() => {
-    if (filterKey === 'all') return documents
+  const newCount = useMemo(() => {
     return documents.filter((doc) => {
-      const key =
-        doc.type === 'collection' ? `col:${doc.collection}` : `glob:${doc.globalSlug}`
+      const status = getReviewStatus(doc, notes)
+      if (status !== 'reviewed') return true
+      return doc.fields.some((f) => f.isMissing)
+    }).length
+  }, [documents, notes])
+
+  const filtered = useMemo(() => {
+    if (filterKey === 'all' || filterKey === 'new') return documents
+    return documents.filter((doc) => {
+      const key = doc.type === 'collection' ? `col:${doc.collection}` : `glob:${doc.globalSlug}`
       return key === filterKey
     })
   }, [documents, filterKey])
 
   const displayDocs = useMemo(() => {
-    if (!showOnlyMarked) return filtered
+    if (showMode === 'all') return filtered
+    if (showMode === 'missing') return filtered.filter((doc) => doc.fields.some((f) => f.isMissing))
+    if (showMode === 'warnings') return filtered.filter((doc) => doc.fields.some((f) => f.isWarning && !f.isMissing))
+    // marked
     return filtered.filter((doc) => {
       const docKey = getDocKey(doc)
       return doc.fields.some((f) => markedFields.has(makeFieldKey(docKey, f.path)))
     })
-  }, [filtered, markedFields, showOnlyMarked])
+  }, [filtered, markedFields, showMode])
+
+  // "New" filter hides docs that are reviewed AND haven't changed AND have no errors
+  const visibleDocs = useMemo(() => {
+    if (filterKey !== 'new') return displayDocs
+    return displayDocs.filter((doc) => {
+      const status = getReviewStatus(doc, notes)
+      if (status !== 'reviewed') return true
+      // Always show if there are errors, even if reviewed
+      return doc.fields.some((f) => f.isMissing)
+    })
+  }, [displayDocs, filterKey, notes])
 
   const markedCount = markedFields.size
+  const totalMissing = documents.reduce(
+    (sum, doc) => sum + doc.fields.filter((f) => f.isMissing).length,
+    0,
+  )
+  const totalWarnings = documents.reduce(
+    (sum, doc) => sum + doc.fields.filter((f) => f.isWarning && !f.isMissing).length,
+    0,
+  )
 
   const handleExportAll = () => {
     const data = {
@@ -330,9 +549,29 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
 
   const showLocaleSelectors = localeCodes.length > 2
 
+  function ModeButton({ mode, label, count, color }: { mode: ShowMode; label: string; count?: number; color?: string }) {
+    const active = showMode === mode
+    return (
+      <button
+        type="button"
+        onClick={() => setShowMode(active ? 'all' : mode)}
+        disabled={!active && (count === 0 || count === undefined)}
+        style={{
+          ...selectStyle,
+          opacity: !active && (count === 0 || count === undefined) ? 0.4 : 1,
+          borderColor: active && color ? `${color}88` : undefined,
+          color: active && color ? color : undefined,
+          background: active && color ? `${color}14` : undefined,
+        }}
+      >
+        {label}{count !== undefined ? ` (${count})` : ''}
+      </button>
+    )
+  }
+
   return (
     <>
-      <style>{MARKED_STYLE}</style>
+      <style>{STYLES}</style>
 
       {/* Toolbar */}
       <div
@@ -369,6 +608,7 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px' }}>
           <span style={{ color: 'var(--theme-elevation-500)' }}>Show:</span>
           <select value={filterKey} onChange={(e) => setFilterKey(e.target.value)} style={selectStyle}>
+            <option value="new">New ({newCount})</option>
             <option value="all">All ({documents.length})</option>
             {groupOptions.map((opt) => (
               <option key={opt.key} value={opt.key}>{opt.label}</option>
@@ -378,10 +618,15 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
 
         <span style={{ display: 'inline-block', width: '1px', height: '20px', background: 'var(--theme-elevation-200)' }} />
 
+        <ModeButton mode="missing" label="Show Missing" count={totalMissing} color="#ef4444" />
+        <ModeButton mode="warnings" label="Show Warnings" count={totalWarnings} color="#ca8a04" />
+        <ModeButton mode="marked" label="Show Marked" count={markedCount} color="#f59e0b" />
+
+        <span style={{ display: 'inline-block', width: '1px', height: '20px', background: 'var(--theme-elevation-200)' }} />
+
         <button type="button" onClick={handleExportAll} style={selectStyle}>
           Export JSON
         </button>
-
         <button
           type="button"
           onClick={handleExportMarked}
@@ -396,34 +641,27 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
           Export Marked ({markedCount})
         </button>
 
-        <button
-          type="button"
-          onClick={() => setShowOnlyMarked((v) => !v)}
-          disabled={markedCount === 0 && !showOnlyMarked}
-          style={{
-            ...selectStyle,
-            opacity: markedCount === 0 && !showOnlyMarked ? 0.4 : 1,
-            borderColor: showOnlyMarked ? 'rgba(245,158,11,0.5)' : undefined,
-            color: showOnlyMarked ? '#f59e0b' : undefined,
-            background: showOnlyMarked ? 'rgba(245,158,11,0.08)' : undefined,
-          }}
-        >
-          {showOnlyMarked ? 'Show All' : 'Show Marked Only'}
-        </button>
-
         <span style={{ marginLeft: 'auto', fontSize: '13px', color: 'var(--theme-elevation-400)' }}>
-          {displayDocs.length} doc{displayDocs.length !== 1 ? 's' : ''}
+          {visibleDocs.length}{filterKey === 'new' && visibleDocs.length !== displayDocs.length ? `/${displayDocs.length}` : ''} doc{visibleDocs.length !== 1 ? 's' : ''}
           {!showLocaleSelectors && ` · ${localeA.toUpperCase()} vs ${localeB.toUpperCase()}`}
         </span>
       </div>
 
       {/* Document list */}
-      {displayDocs.length === 0 ? (
+      {visibleDocs.length === 0 ? (
         <p style={{ color: 'var(--theme-elevation-400)', fontSize: '14px' }}>
-          {showOnlyMarked ? 'No marked fields yet. Click rows to mark them.' : 'No documents.'}
+          {showMode === 'missing'
+            ? 'No missing fields found — everything looks complete.'
+            : showMode === 'warnings'
+            ? 'No warnings — all localized fields have distinct content.'
+            : showMode === 'marked'
+            ? 'No marked fields yet. Click rows to mark them.'
+            : filterKey === 'new'
+            ? 'All documents reviewed — nothing new since last review.'
+            : 'No documents.'}
         </p>
       ) : (
-        displayDocs.map((doc, i) => (
+        visibleDocs.map((doc, i) => (
           <DocumentCard
             key={i}
             doc={doc}
@@ -431,7 +669,10 @@ export function ContentReviewList({ documents, localeCodes }: Props) {
             localeB={localeB}
             markedFields={markedFields}
             onToggleMark={handleToggleMark}
-            showOnlyMarked={showOnlyMarked}
+            showMode={showMode}
+            reviewStatus={getReviewStatus(doc, notes)}
+            onToggleReviewed={handleToggleReviewed}
+            isPending={pendingKeys.has(doc.docKey)}
           />
         ))
       )}

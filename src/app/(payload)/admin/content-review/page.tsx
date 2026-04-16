@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 
 export default async function ContentReviewPage() {
   const payload = await getPayload({ config })
-  const { documents, localeCodes } = await fetchAllContent(payload)
+  const { documents, localeCodes, notes } = await fetchAllContent(payload)
 
   return (
     <div
@@ -64,7 +64,7 @@ export default async function ContentReviewPage() {
           padding: '32px 24px',
         }}
       >
-        <ContentReviewList documents={documents} localeCodes={localeCodes} />
+        <ContentReviewList documents={documents} localeCodes={localeCodes} initialNotes={notes} />
       </div>
     </div>
   )

@@ -4,6 +4,11 @@ import type { Payload } from 'payload'
 export interface ContentField {
   path: string
   values: Record<string, string> // locale code -> extracted text
+  isMissing: boolean  // red: translation gap or required+empty
+  isWarning: boolean  // yellow: equal content across locales, or missing meta image
+  warningNote?: string // short explanation for yellow rows
+  singleValue?: string // for non-localized JSON fields like localizedPaths — render as single cell
+  isLocalized: boolean // true only when extracted from a { en: ..., sv: ... } locale object
 }
 
 export interface ContentDocument {
@@ -16,6 +21,16 @@ export interface ContentDocument {
   documentTitle: string
   editUrl: string
   fields: ContentField[]
+  /** Stable key used for review notes: "collection:id" or "global:slug" */
+  docKey: string
+  /** ISO string — the doc's updatedAt at fetch time */
+  docUpdatedAt: string
+}
+
+export interface ReviewNote {
+  key: string
+  /** ISO string — the doc's updatedAt when it was last marked reviewed */
+  docUpdatedAt: string
 }
 
 const SKIP_FIELDS = new Set([
@@ -41,10 +56,18 @@ const SKIP_FIELDS = new Set([
   'thumbnailURL',
   'usageCount',
   'usedIn',
-  'blockType', // always a dev slug, not user content
+  'blockType',
 ])
 
 const SYSTEM_SLUGS = new Set(['users', 'media', 'payload-preferences', 'payload-migrations'])
+
+// Fields where identical content across locales is expected and not worth warning about
+const EQUAL_CONTENT_OK = new Set([
+  'slug',
+  'sectionId',
+  'publishDate',
+  'path',
+])
 
 function isLexical(val: unknown): val is { root: unknown } {
   return typeof val === 'object' && val !== null && !Array.isArray(val) && 'root' in val
@@ -76,7 +99,6 @@ function lexicalToText(json: unknown): string {
         .filter((s) => s.trim())
         .join('\n')
     }
-    // paragraph, heading, listitem, quote, etc. — collect inline content
     return children.map(extractInline).join('')
   }
 
@@ -99,6 +121,14 @@ function isMediaRef(val: unknown): boolean {
   if (typeof val !== 'object' || val === null || Array.isArray(val)) return false
   const obj = val as Record<string, unknown>
   return typeof obj.id === 'number' && typeof obj.filename === 'string'
+}
+
+/** Returns the leaf key of a dot-path, e.g. "sections[0].cta.url" → "url" */
+function leafKey(path: string): string {
+  const dot = path.lastIndexOf('.')
+  const bracket = path.lastIndexOf('[')
+  const cut = Math.max(dot, bracket)
+  return cut === -1 ? path : path.slice(cut + 1).replace(/]$/, '')
 }
 
 function extractFields(
@@ -127,13 +157,16 @@ function extractFields(
       let hasContent = false
       for (const code of localeCodes) {
         const localeVal = obj[code]
-        // Skip numeric values (relation IDs at depth: 0)
         if (typeof localeVal === 'number') continue
-        const str = isLexical(localeVal) ? lexicalToText(localeVal) : (typeof localeVal === 'string' ? localeVal : '')
+        const str = isLexical(localeVal)
+          ? lexicalToText(localeVal)
+          : typeof localeVal === 'string'
+          ? localeVal
+          : ''
         values[code] = str
         if (str) hasContent = true
       }
-      if (hasContent) fields.push({ path, values })
+      if (hasContent) fields.push({ path, values, isMissing: false, isWarning: false, isLocalized: true })
       return
     }
 
@@ -142,7 +175,7 @@ function extractFields(
       if (str) {
         const values: Record<string, string> = {}
         for (const code of localeCodes) values[code] = str
-        fields.push({ path, values })
+        fields.push({ path, values, isMissing: false, isWarning: false, isLocalized: false })
       }
       return
     }
@@ -155,12 +188,65 @@ function extractFields(
     return
   }
 
-  // Only include string scalars (skip numbers, booleans — likely IDs or flags)
   if (typeof value === 'string' && value) {
     const values: Record<string, string> = {}
     for (const code of localeCodes) values[code] = value
-    fields.push({ path, values })
+    fields.push({ path, values, isMissing: false, isWarning: false, isLocalized: false })
   }
+}
+
+function collectRequiredPaths(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fields: any[],
+  prefix: string,
+  out: Array<{ path: string; localized: boolean; fieldType: string }>,
+  docRecord: Record<string, unknown>,
+  siblingData: Record<string, unknown>,
+) {
+  for (const f of fields ?? []) {
+    if (f.type === 'tabs') {
+      for (const tab of f.tabs ?? []) {
+        const tabPrefix = tab.name ? (prefix ? `${prefix}.${tab.name}` : tab.name) : prefix
+        const tabSibling = tab.name
+          ? ((siblingData[tab.name] ?? {}) as Record<string, unknown>)
+          : siblingData
+        collectRequiredPaths(tab.fields ?? [], tabPrefix, out, docRecord, tabSibling)
+      }
+      continue
+    }
+    if (!f.name) {
+      if (f.fields) collectRequiredPaths(f.fields, prefix, out, docRecord, siblingData)
+      continue
+    }
+
+    // Evaluate admin.condition — skip field (and its children) if condition is falsy
+    if (typeof f.admin?.condition === 'function') {
+      try {
+        if (!f.admin.condition(docRecord, siblingData)) continue
+      } catch {
+        continue // if condition throws, skip rather than false-alarm
+      }
+    }
+
+    const path = prefix ? `${prefix}.${f.name}` : f.name
+    if (f.required) {
+      out.push({ path, localized: !!f.localized, fieldType: f.type as string })
+    }
+    if (f.type === 'group' && f.fields) {
+      const groupSibling = (siblingData[f.name] ?? {}) as Record<string, unknown>
+      collectRequiredPaths(f.fields, path, out, docRecord, groupSibling)
+    }
+  }
+}
+
+function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
+  const parts = path.split('.')
+  let current: unknown = obj
+  for (const part of parts) {
+    if (typeof current !== 'object' || current === null) return undefined
+    current = (current as Record<string, unknown>)[part]
+  }
+  return current
 }
 
 function getDocumentTitle(
@@ -182,16 +268,157 @@ function getDocumentTitle(
   return resolve(doc.title) || resolve(doc.name) || resolve(doc.metaTitle) || String(doc.id ?? 'Untitled')
 }
 
+function applyMissingDetection(
+  fields: ContentField[],
+  docRecord: Record<string, unknown>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  configFields: any[],
+  localeCodes: string[],
+): void {
+  // Flag translation gaps
+  for (const field of fields) {
+    const withValue = localeCodes.filter((c) => !!field.values[c])
+    const without = localeCodes.filter((c) => !field.values[c])
+    if (withValue.length > 0 && without.length > 0) {
+      field.isMissing = true
+    }
+  }
+
+  // Inject missing required fields
+  const requiredDefs: Array<{ path: string; localized: boolean; fieldType: string }> = []
+  collectRequiredPaths(configFields, '', requiredDefs, docRecord, docRecord)
+  const extractedByPath = new Map(fields.map((f) => [f.path, f]))
+
+  for (const { path, localized, fieldType } of requiredDefs) {
+    const existing = extractedByPath.get(path)
+    if (existing) {
+      if (localeCodes.some((c) => !existing.values[c])) existing.isMissing = true
+    } else {
+      const rawVal = getNestedValue(docRecord, path)
+
+      // With locale:'all', localized fields return { en: "...", sv: "..." }.
+      // An all-empty locale object (e.g. { en: "", sv: "" }) is still a non-null
+      // object, so we must check the individual locale values, not the object itself.
+      let isEmpty: boolean
+      if (localized && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
+        const localeObj = rawVal as Record<string, unknown>
+        isEmpty = localeCodes.every((code) => {
+          const v = localeObj[code]
+          return v === null || v === undefined || v === ''
+        })
+      } else {
+        const isRelation = fieldType === 'upload' || fieldType === 'relationship'
+        isEmpty = rawVal === null || rawVal === undefined || rawVal === '' ||
+          (isRelation && !rawVal)
+      }
+
+      if (isEmpty) {
+        const values: Record<string, string> = {}
+        if (localized && typeof rawVal === 'object' && rawVal !== null) {
+          for (const code of localeCodes) {
+            const v = (rawVal as Record<string, unknown>)[code]
+            values[code] = typeof v === 'string' ? v : ''
+          }
+        } else {
+          for (const code of localeCodes) values[code] = ''
+        }
+        fields.push({ path, values, isMissing: true, isWarning: false, isLocalized: localized })
+        extractedByPath.set(path, fields[fields.length - 1])
+      }
+    }
+  }
+}
+
+/**
+ * Equal-content warning: localized fields where all locales have identical non-empty text.
+ * Skip fields where equal content is expected (slug, sectionId, dates, etc.).
+ */
+function applyEqualContentWarning(fields: ContentField[], localeCodes: string[]): void {
+  if (localeCodes.length < 2) return
+  for (const field of fields) {
+    if (field.isMissing) continue
+    if (!field.isLocalized) continue
+    const k = leafKey(field.path)
+    if (EQUAL_CONTENT_OK.has(k)) continue
+    const vals = localeCodes.map((c) => field.values[c] ?? '')
+    const allFilled = vals.every((v) => v.length > 0)
+    const allEqual = vals.every((v) => v === vals[0])
+    if (allFilled && allEqual) {
+      field.isWarning = true
+      field.warningNote = 'Equal content across locales'
+    }
+  }
+}
+
+/**
+ * Soft warning: meta image is missing. Not required but worth noting for most pages.
+ */
+function applyMetaImageWarning(
+  docRecord: Record<string, unknown>,
+  localeCodes: string[],
+  fields: ContentField[],
+): void {
+  if (!('metaImage' in docRecord)) return
+  const val = docRecord.metaImage
+  const hasImage = val !== null && val !== undefined && val !== 0 && val !== ''
+  if (!hasImage) {
+    const values: Record<string, string> = {}
+    for (const code of localeCodes) values[code] = ''
+    const existingIdx = fields.findIndex((f) => f.path === 'metaImage')
+    if (existingIdx === -1) {
+      fields.push({ path: 'metaImage', values, isMissing: false, isWarning: true, warningNote: 'No meta image set', isLocalized: false })
+    } else {
+      fields[existingIdx].isWarning = true
+      fields[existingIdx].warningNote = 'No meta image set'
+    }
+  }
+}
+
+/**
+ * localizedPaths: render as a single JSON cell rather than locale columns.
+ */
+function checkLocalizedPaths(
+  docRecord: Record<string, unknown>,
+  localeCodes: string[],
+  fields: ContentField[],
+): void {
+  if (!('localizedPaths' in docRecord)) return
+  const lp = docRecord.localizedPaths
+  const lpObj =
+    typeof lp === 'object' && lp !== null && !Array.isArray(lp)
+      ? (lp as Record<string, unknown>)
+      : {}
+
+  const filled: Record<string, string> = {}
+  let hasMissing = false
+  for (const code of localeCodes) {
+    const val = typeof lpObj[code] === 'string' ? (lpObj[code] as string) : ''
+    filled[code] = val
+    if (!val) hasMissing = true
+  }
+
+  const jsonDisplay = JSON.stringify(filled, null, 2)
+  fields.push({
+    path: 'localizedPaths',
+    values: {},
+    singleValue: jsonDisplay,
+    isMissing: hasMissing,
+    isWarning: false,
+    isLocalized: false,
+  })
+}
+
 export async function fetchAllContent(payload: Payload): Promise<{
   documents: ContentDocument[]
   localeCodes: string[]
+  notes: Record<string, ReviewNote> // keyed by docKey
 }> {
   const localeConfig = payload.config.localization !== false ? payload.config.localization : undefined
   const localeCodes: string[] = localeConfig?.locales.map((l) => l.code) ?? ['en']
 
   const documents: ContentDocument[] = []
 
-  // Collections (skip system/media collections)
+  // Collections
   const collections = payload.config.collections.filter((c) => !SYSTEM_SLUGS.has(c.slug))
 
   for (const collectionConfig of collections) {
@@ -216,11 +443,18 @@ export async function fetchAllContent(payload: Payload): Promise<{
         const docRecord = doc as Record<string, unknown>
         const title = getDocumentTitle(collectionConfig.slug, docRecord, localeCodes)
         const fields: ContentField[] = []
+
         for (const [key, value] of Object.entries(docRecord)) {
           if (SKIP_FIELDS.has(key)) continue
           extractFields(value, key, key, localeCodes, fields)
         }
 
+        applyMissingDetection(fields, docRecord, (collectionConfig as any).fields ?? [], localeCodes)
+        applyEqualContentWarning(fields, localeCodes)
+        applyMetaImageWarning(docRecord, localeCodes, fields)
+        checkLocalizedPaths(docRecord, localeCodes, fields)
+
+        const docKey = `${collectionConfig.slug}:${doc.id}`
         documents.push({
           type: 'collection',
           collection: collectionConfig.slug,
@@ -229,6 +463,8 @@ export async function fetchAllContent(payload: Payload): Promise<{
           documentTitle: title,
           editUrl: `/admin/collections/${collectionConfig.slug}/${doc.id}`,
           fields,
+          docKey,
+          docUpdatedAt: String(docRecord.updatedAt ?? ''),
         })
       }
 
@@ -253,11 +489,16 @@ export async function fetchAllContent(payload: Payload): Promise<{
 
       const docRecord = doc as Record<string, unknown>
       const fields: ContentField[] = []
+
       for (const [key, value] of Object.entries(docRecord)) {
         if (SKIP_FIELDS.has(key)) continue
         extractFields(value, key, key, localeCodes, fields)
       }
 
+      applyMissingDetection(fields, docRecord, (globalConfig as any).fields ?? [], localeCodes)
+      applyEqualContentWarning(fields, localeCodes)
+
+      const docKey = `global:${globalConfig.slug}`
       documents.push({
         type: 'global',
         globalSlug: globalConfig.slug,
@@ -265,11 +506,42 @@ export async function fetchAllContent(payload: Payload): Promise<{
         documentTitle: globalLabel,
         editUrl: `/admin/globals/${globalConfig.slug}`,
         fields,
+        docKey,
+        docUpdatedAt: String(docRecord.updatedAt ?? ''),
       })
     } catch {
       // Skip globals that haven't been saved yet
     }
   }
 
-  return { documents, localeCodes }
+  // Fetch all review notes in one query
+  const notes: Record<string, ReviewNote> = {}
+  try {
+    let notePage = 1
+    while (true) {
+      const batch = await payload.find({
+        collection: 'content-review-notes',
+        limit: 200,
+        page: notePage,
+        overrideAccess: true,
+        depth: 0,
+      })
+      for (const note of batch.docs) {
+        const n = note as Record<string, unknown>
+        const key = String(n.key ?? '')
+        if (key) {
+          notes[key] = {
+            key,
+            docUpdatedAt: String(n.docUpdatedAt ?? ''),
+          }
+        }
+      }
+      if (!batch.hasNextPage) break
+      notePage++
+    }
+  } catch {
+    // Collection may not exist yet (before first migration) — safe to skip
+  }
+
+  return { documents, localeCodes, notes }
 }
