@@ -71,22 +71,27 @@ export type FieldEdit = {
 }
 
 /**
- * Save inline edits from the Content Review page as a draft.
+ * Save inline edits from the Content Review page and publish immediately.
  * editsByLocale: locale code → array of {path, value, fieldType}
  *
  * Strategy:
  *  1. Fetch the document with the specific locale (flat values, not locale objects)
  *  2. Apply each edit by path — convert markdown → Lexical for richText fields
- *  3. Save as draft for that locale
+ *  3. Publish for that locale (no intermediate draft state)
+ *
+ * Returns the latest updatedAt so the caller can refresh the review note
+ * timestamp without a second round-trip.
  */
 export async function saveDocumentEdits(
   docKey: string,
   editsByLocale: Record<string, FieldEdit[]>,
-): Promise<void> {
+): Promise<{ updatedAt: string }> {
   const payload = await getPayload({ config })
   const isGlobal = docKey.startsWith('global:')
   const slug = isGlobal ? docKey.slice(7) : docKey.split(':')[0]
   const id = isGlobal ? null : docKey.split(':').slice(1).join(':')
+
+  let latestUpdatedAt = ''
 
   for (const [locale, edits] of Object.entries(editsByLocale)) {
     if (edits.length === 0) continue
@@ -123,25 +128,26 @@ export async function saveDocumentEdits(
       deepSetPath(data, edit.path, value)
     }
 
-    if (isGlobal) {
-      await (payload.updateGlobal as any)({
-        slug,
-        locale,
-        data,
-        draft: true,
-        overrideAccess: true,
-      })
-    } else {
-      await payload.update({
-        collection: slug as 'pages',
-        id: id!,
-        locale: locale as 'en',
-        data,
-        draft: true,
-        overrideAccess: true,
-      })
-    }
+    const result = isGlobal
+      ? await (payload.updateGlobal as any)({
+          slug,
+          locale,
+          data,
+          overrideAccess: true,
+        })
+      : await payload.update({
+          collection: slug as 'pages',
+          id: id!,
+          locale: locale as 'en',
+          data,
+          overrideAccess: true,
+        })
+
+    const ts = String((result as Record<string, unknown>)?.updatedAt ?? '')
+    if (ts) latestUpdatedAt = ts
   }
+
+  return { updatedAt: latestUpdatedAt || new Date().toISOString() }
 }
 
 export async function unmarkDocumentReviewed(key: string): Promise<void> {

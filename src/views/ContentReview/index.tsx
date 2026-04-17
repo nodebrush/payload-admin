@@ -254,7 +254,7 @@ function DocumentCard({
                   opacity: isSaving ? 0.6 : 1,
                 }}
               >
-                {isSaving ? 'Saving…' : '✓ Save Draft'}
+                {isSaving ? 'Publishing…' : '✓ Save & Publish'}
               </button>
               <button
                 type="button"
@@ -600,7 +600,14 @@ export function ContentReviewList({ documents, localeCodes, initialNotes }: Prop
         const fieldType = doc.fields.find((f) => f.path === path)?.fieldType ?? 'text'
         ;(editsByLocale[locale] ??= []).push({ path, value, fieldType })
       }
-      await saveDocumentEdits(doc.docKey, editsByLocale)
+      const { updatedAt } = await saveDocumentEdits(doc.docKey, editsByLocale)
+      // Publish bumps updatedAt — auto-mark reviewed with the new timestamp so the
+      // doc doesn't flip to "changed" immediately after the user just reviewed it.
+      await markDocumentReviewed(doc.docKey, updatedAt)
+      setNotes((prev) => ({
+        ...prev,
+        [doc.docKey]: { key: doc.docKey, docUpdatedAt: updatedAt },
+      }))
       setEditingDocKey(null)
       setCurrentEdits({})
       router.refresh()
