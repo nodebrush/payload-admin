@@ -136,21 +136,21 @@ export function DraftList({ initialDrafts }: DraftListProps) {
 
   // ── Group by collection/global ────────────────────────────────────────────
 
-  const collections = ['pages', 'blog', 'projects', 'menus'] as const
-  const COLLECTION_LABELS: Record<string, string> = {
-    pages: 'Pages',
-    blog: 'Blog',
-    projects: 'Projects',
-    menus: 'Menus',
-  }
-
-  const collectionGroups = collections
-    .map((col) => ({
-      collection: col,
-      label: COLLECTION_LABELS[col],
-      drafts: initialDrafts.filter((d) => d.type === 'collection' && d.collection === col),
-    }))
-    .filter((g) => g.drafts.length > 0)
+  const collectionGroups = (() => {
+    const groups = new Map<string, { collection: string; label: string; drafts: PendingDraft[] }>()
+    for (const draft of initialDrafts) {
+      if (draft.type !== 'collection' || !draft.collection) continue
+      const existing = groups.get(draft.collection)
+      if (existing) existing.drafts.push(draft)
+      else
+        groups.set(draft.collection, {
+          collection: draft.collection,
+          label: draft.collectionLabel ?? draft.collection,
+          drafts: [draft],
+        })
+    }
+    return Array.from(groups.values())
+  })()
 
   const globalDrafts = initialDrafts.filter((d) => d.type === 'global')
 

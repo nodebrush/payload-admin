@@ -31,11 +31,48 @@ function deepSetPath(obj: Record<string, unknown>, path: string, value: unknown)
   current[segments[segments.length - 1]] = value
 }
 
-export async function markDocumentReviewed(key: string, docUpdatedAt: string): Promise<void> {
+/**
+ * Flip the document's `_status` from 'draft' to 'published'. `_status` is a
+ * non-localized system field, so a single update without a locale suffices.
+ */
+async function publishDocument(docKey: string): Promise<{ updatedAt: string }> {
+  const payload = await getPayload({ config })
+  const isGlobal = docKey.startsWith('global:')
+  const slug = isGlobal ? docKey.slice(7) : docKey.split(':')[0]
+  const id = isGlobal ? null : docKey.split(':').slice(1).join(':')
+
+  const result = isGlobal
+    ? await (payload.updateGlobal as any)({
+        slug,
+        data: { _status: 'published' },
+        overrideAccess: true,
+      })
+    : await payload.update({
+        collection: slug as 'pages',
+        id: id!,
+        data: { _status: 'published' } as any,
+        overrideAccess: true,
+      })
+
+  const ts = String((result as Record<string, unknown>)?.updatedAt ?? '')
+  return { updatedAt: ts || new Date().toISOString() }
+}
+
+export async function markDocumentReviewed(
+  key: string,
+  docUpdatedAt: string,
+  shouldPublish = false,
+): Promise<{ updatedAt: string }> {
   const payload = await getPayload({ config })
 
+  let finalTimestamp = docUpdatedAt
+  if (shouldPublish) {
+    const { updatedAt } = await publishDocument(key)
+    finalTimestamp = updatedAt
+  }
+
   // Globals without versioning have no updatedAt — store review time as fallback
-  const timestamp = docUpdatedAt || new Date().toISOString()
+  const timestamp = finalTimestamp || new Date().toISOString()
 
   const existing = await payload.find({
     collection: 'content-review-notes',
@@ -58,6 +95,8 @@ export async function markDocumentReviewed(key: string, docUpdatedAt: string): P
       overrideAccess: true,
     })
   }
+
+  return { updatedAt: timestamp }
 }
 
 // ---------------------------------------------------------------------------

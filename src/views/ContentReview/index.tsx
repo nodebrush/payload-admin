@@ -288,7 +288,11 @@ function DocumentCard({
                   transition: 'color 0.15s, border-color 0.15s',
                 }}
               >
-                {reviewStatus === 'reviewed' ? '✓ Reviewed' : 'Mark Reviewed'}
+                {reviewStatus === 'reviewed'
+                  ? '✓ Reviewed'
+                  : doc.docStatus === 'draft'
+                  ? 'Mark Reviewed & Publish'
+                  : 'Mark Reviewed'}
               </button>
               <button
                 type="button"
@@ -558,11 +562,17 @@ export function ContentReviewList({ documents, localeCodes, initialNotes }: Prop
             return next
           })
         } else {
-          await markDocumentReviewed(key, doc.docUpdatedAt)
+          const shouldPublish = doc.docStatus === 'draft'
+          const { updatedAt } = await markDocumentReviewed(
+            key,
+            doc.docUpdatedAt,
+            shouldPublish,
+          )
           setNotes((prev) => ({
             ...prev,
-            [key]: { key, docUpdatedAt: doc.docUpdatedAt },
+            [key]: { key, docUpdatedAt: updatedAt },
           }))
+          if (shouldPublish) router.refresh()
         }
       } finally {
         setPendingKeys((prev) => {

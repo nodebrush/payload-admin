@@ -28,6 +28,8 @@ export interface ContentDocument {
   docKey: string
   /** ISO string — the doc's updatedAt at fetch time */
   docUpdatedAt: string
+  /** 'draft' if latest version is unpublished, 'published' if it is, null if no versioning */
+  docStatus: 'draft' | 'published' | null
 }
 
 export interface ReviewNote {
@@ -63,7 +65,14 @@ const SKIP_FIELDS = new Set([
   'blockType',
 ])
 
-const SYSTEM_SLUGS = new Set(['users', 'media', 'payload-preferences', 'payload-migrations'])
+const SYSTEM_SLUGS = new Set([
+  'users',
+  'media',
+  'payload-preferences',
+  'payload-migrations',
+  'content-review-notes',
+  'messages',
+])
 
 // Fields where identical content across locales is expected and not worth warning about
 const EQUAL_CONTENT_OK = new Set([
@@ -468,6 +477,9 @@ export async function fetchAllContent(payload: Payload): Promise<{
         applyMetaImageWarning(docRecord, localeCodes, fields)
         checkLocalizedPaths(docRecord, localeCodes, fields)
 
+        const rawStatus = docRecord._status
+        const docStatus =
+          rawStatus === 'draft' || rawStatus === 'published' ? rawStatus : null
         const docKey = `${collectionConfig.slug}:${doc.id}`
         documents.push({
           type: 'collection',
@@ -479,6 +491,7 @@ export async function fetchAllContent(payload: Payload): Promise<{
           fields,
           docKey,
           docUpdatedAt: String(docRecord.updatedAt ?? ''),
+          docStatus,
         })
       }
 
@@ -512,6 +525,9 @@ export async function fetchAllContent(payload: Payload): Promise<{
       applyMissingDetection(fields, docRecord, (globalConfig as any).fields ?? [], localeCodes)
       applyEqualContentWarning(fields, localeCodes)
 
+      const rawStatus = docRecord._status
+      const docStatus =
+        rawStatus === 'draft' || rawStatus === 'published' ? rawStatus : null
       const docKey = `global:${globalConfig.slug}`
       documents.push({
         type: 'global',
@@ -522,6 +538,7 @@ export async function fetchAllContent(payload: Payload): Promise<{
         fields,
         docKey,
         docUpdatedAt: String(docRecord.updatedAt ?? ''),
+        docStatus,
       })
     } catch {
       // Skip globals that haven't been saved yet
