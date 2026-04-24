@@ -3,6 +3,7 @@ import { ContentReviewNotes } from '@payload-admin/collections/ContentReviewNote
 import { draftProtectionPlugin } from '@payload-admin/plugins/draftProtectionPlugin'
 import { searchPlugin } from '@payload-admin/plugins/searchPlugin'
 import { invitesPlugin } from '@payload-admin/invites/plugin'
+import { previewAuthPlugin } from '@payload-admin/previewAuth/plugin'
 import { sendgridEmail } from '@payload-admin/email/sendgridEmail'
 
 /**
@@ -50,6 +51,7 @@ export function payloadAdminPlugin(options: PayloadAdminPluginOptions = {}): Plu
     if (invites) {
       result = await invitesPlugin()(result)
     }
+    result = await previewAuthPlugin()(result)
     if (email) {
       result = {
         ...result,
