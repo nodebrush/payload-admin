@@ -55,13 +55,18 @@ export const previewAuthPlugin = (): Plugin => (incomingConfig: Config): Config 
     },
   }
 
+  const previewButtons = [
+    '@payload-admin/previewAuth/CopyPreviewUrlButton',
+    '@payload-admin/previewAuth/OpenPreviewSiteButton',
+  ]
+
   const collections = incomingConfig.collections?.map((coll): CollectionConfig => {
     if (livePreviewCollections.has(coll.slug)) {
       const existingBefore = coll.admin?.components?.edit?.beforeDocumentControls ?? []
-      const alreadyInjected = existingBefore.some(
-        (c) => typeof c === 'string' && c.includes('CopyPreviewUrlButton'),
+      const missing = previewButtons.filter(
+        (path) => !existingBefore.some((c) => typeof c === 'string' && c === path),
       )
-      if (alreadyInjected) return coll
+      if (missing.length === 0) return coll
 
       return {
         ...coll,
@@ -73,7 +78,7 @@ export const previewAuthPlugin = (): Plugin => (incomingConfig: Config): Config 
               ...coll.admin?.components?.edit,
               beforeDocumentControls: [
                 ...existingBefore,
-                '@payload-admin/previewAuth/CopyPreviewUrlButton',
+                ...missing,
               ],
             },
           },

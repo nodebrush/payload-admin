@@ -36,7 +36,7 @@ S3_ACCESS_KEY_ID=
 S3_SECRET_ACCESS_KEY=
 PUBLIC_SITE_URL=http://localhost:5173
 PUBLIC_PAYLOAD_ADMIN_URL=http://localhost:3000
-PREVIEW_SITE_URL=http://localhost:5173
+PUBLIC_PREVIEW_URL=http://localhost:5173
 ```
 
 ## Component aliases
