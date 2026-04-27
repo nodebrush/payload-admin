@@ -70,8 +70,11 @@ const SYSTEM_SLUGS = new Set([
   'media',
   'payload-preferences',
   'payload-migrations',
+  'payload-locked-documents',
   'content-review-notes',
   'messages',
+  'preview-keys',
+  'access-logs',
 ])
 
 // Fields where identical content across locales is expected and not worth warning about
